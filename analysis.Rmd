@@ -1,0 +1,146 @@
+---
+title: "Teacher Talk"
+author: "Shamini Nair and Dan Yurovsky"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    highlight: tango
+    theme: sandstone
+    code_folding: hide
+    toc: false
+    toc_float: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, library, message=F, results='hide', warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(lme4)
+library(readxl)
+library(tidyboot)
+library(lmerTest)
+library(scales)
+
+theme_set(theme_classic(base_size = 18))
+```
+
+Read in files
+
+```{r read_transcripts, warning=FALSE, message = FALSE}
+files <- list.files("data", pattern = ".xlsx", full.names = T) 
+
+read_file <- function(filename) {
+ read_xlsx(filename) %>%
+    select(-Time) %>%
+    mutate(id = str_split(filename, "[/._]")  %>% unlist %>% nth(2))
+}
+
+
+transcripts <- map(files, read_file) %>%
+  bind_rows() %>%
+  select(-X__1:-X__6) %>%
+  mutate(id = if_else(id == "Ja", "J", id))
+
+
+aggregate_data <- read_csv("data/utterance_data.csv")
+```
+
+Bind data and demos together
+
+```{r merge_data}
+demo_data <- aggregate_data %>%
+  distinct(School, .keep_all = T) %>%
+  rename(fee = `Annual Fees (INR)`,
+         age = `Average Age of Kids`, 
+         ts_ratio =  `T:S ratio`,
+         school_type = `PR/PU/A`) %>%
+  select(School, age, fee, ts_ratio, school_type) %>%
+  mutate(ts_ratio = str_split(ts_ratio, ":")) %>%
+  mutate(ts_ratio = map(ts_ratio, ~ nth(.x,2))) %>%
+  mutate(ts_ratio = unlist(ts_ratio) %>% as.numeric)
+
+tidy_data <- transcripts %>%
+  left_join(demo_data, by = c("id" = "School")) %>%
+  filter(Speaker == "M") %>%
+  rename(error = `Grammatical Error`,
+         bilingual = `Bilingual Utterances`,
+         not_english = NE) %>%
+  rename_all(tolower) %>%
+  select(-`morphemes (only grammatically correct utterances)`:- 
+           `morphemes(only grammatically correct english utterances)`) %>%
+  mutate(error = if_else(is.na(error), 0, error))
+```
+
+MLU analysis
+```{r mlu_analsis, fig.width=6, fig.height = 4}
+
+school_data <- tidy_data %>%
+  filter(!not_english, !bilingual, !error) %>%
+  group_by(fee, id) %>%
+  tidyboot_mean(morphemes, na.rm = T)
+
+ggplot(filter(school_data, fee != 1), aes(x = fee, y = empirical_stat,
+                        ymax = ci_upper, ymin = ci_lower)) +
+  geom_pointrange() +
+  geom_smooth(se = F, method = "gam", color = "#e41a1c") + 
+  scale_color_brewer(palette = "Set1") + 
+  scale_fill_brewer(palette = "Set1") + 
+  scale_x_log10(name = "Annual Fee (INR)", labels = dollar) +
+  scale_y_continuous(name = "Mean Utterance Length")
+```
+
+```{r error_plot, fig.width = 6, fig.height = 4}
+
+error_data <- tidy_data %>%
+  filter(!not_english, !bilingual) %>%
+  group_by(fee, id) %>%
+  tidyboot_mean(error, na.rm = T)
+
+
+ggplot(filter(error_data, fee != 1), aes(x = fee, y = empirical_stat,
+                        ymax = ci_upper, ymin = ci_lower)) +
+  geom_pointrange() +
+  geom_smooth(se = F, method = "gam", color = "#377eb8") + 
+  scale_color_brewer(palette = "Set1") + 
+  scale_fill_brewer(palette = "Set1") + 
+ scale_x_log10(name = "Annual Fee (INR)", labels = dollar) +
+ scale_y_continuous(name = "Prop. grammatical errors")
+
+```
+
+```{r error_lm}
+error_model_data <- tidy_data %>%
+  filter(!not_english, !bilingual) %>%
+  mutate(log_fee = log(fee)) %>% 
+  filter(!is.na(morphemes))
+
+m3 <- glmer(error ~ log_fee + (1|id), 
+           data = error_model_data, family = "binomial")
+```
+
+```{r plot_data, fig.width = 8, fig.height = 4.5}
+plot_data <- error_data %>%
+  gather(stat, value, -fee, -id) %>%
+  mutate(measure = "error") %>%
+  bind_rows(school_data %>%
+              gather(stat, value, -fee, -id) %>%
+              mutate(measure = "mlu")) %>%
+  spread(stat, value) %>%
+  mutate(measure = factor(measure, levels = c("mlu", "error"),
+                          labels = c("Mean Utt. Length", "Prop. Error")))
+
+ggplot(filter(plot_data, fee != 1), aes(x = fee, y = empirical_stat,
+                        ymax = ci_upper, ymin = ci_lower,
+                        color = measure)) +
+  facet_wrap(~measure, scales = "free_y") +
+  geom_pointrange(color = "black") +
+  geom_smooth(se = F, method = "gam") + 
+  scale_color_brewer(palette = "Set1") + 
+  scale_fill_brewer(palette = "Set1") + 
+ scale_x_log10(name = "Annual Fee (INR)", labels = dollar) +
+  scale_y_continuous(name = "") +
+  theme(legend.position = "none")
+```
